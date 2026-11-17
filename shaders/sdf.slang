@@ -1,7 +1,15 @@
+struct Sdf_Box {
+    float2 pos;
+    float2 size;
+};
+
+static const uint MAX_BOXES = 16;
+
 struct Uniforms {
     float2 resolution;
-    float  time;
-    float  _pad;
+    float time;
+    uint box_count;
+    Sdf_Box boxes[MAX_BOXES];
 };
 
 [[vk::binding(0, 3)]]
@@ -41,10 +49,14 @@ float smin_cubic(float a, float b, float k) {
 float scene(float2 p) {
     float2 c = float2(sin(u.time) * 0.6, 0.0);
 
-    float circle = sdf_circle(p - c, 0.3);
-    float box = sdf_box(p, float2(0.25, 0.25));
+    float d = sdf_circle(p - c, 0.3);
 
-    return smin_cubic(circle, box, 0.05);
+    for (uint i = 0; i < u.box_count; i++) {
+        Sdf_Box b = u.boxes[i];
+        d = smin_cubic(d, sdf_box(p - b.pos, b.size), 0.02);
+    }
+
+    return d;
 }
 
 [shader("fragment")]
@@ -53,7 +65,7 @@ float4 fragment_main(Vertex_Output input) : SV_Target {
     p.y = -p.y;
 
     float d = scene(p);
-    float3 col = d > 0.0 ? float3(0.9, 0.6, 0.3) : float3(0.65, 0.85, 1.0);
+    float3 col = d > 0.0 ? float3(0.9, 0.6, 0.6) : float3(0.65, 0.85, 1.0);
 
     if (d < 0.005 && d > -0.005) {
         col = float3(0.0, 0.0, 0.0);

@@ -4,11 +4,18 @@ import "core:log"
 import sdl "vendor:sdl3"
 
 SHADER_SRC :: "shaders/sdf.slang"
+MAX_BOXES :: 16
+
+Sdf_Box :: struct {
+	pos:  [2]f32,
+	size: [2]f32,
+}
 
 Frag_Uniforms :: struct {
-	resolution: [2]f32,
-	time:       f32,
-	_:          f32,
+	resolution:  [2]f32,
+	time:        f32,
+	boxes_count: u32,
+	boxes:       [MAX_BOXES]Sdf_Box,
 }
 
 Renderer :: struct {
@@ -71,7 +78,7 @@ renderer_reload_pipeline :: proc(r: ^Renderer) {
 	log.info("pipeline reloaded")
 }
 
-renderer_draw :: proc(r: ^Renderer, time: f32) {
+renderer_draw :: proc(r: ^Renderer, time: f32, boxes: []Sdf_Box) {
 	cmd := sdl.AcquireGPUCommandBuffer(r.device)
 	if cmd == nil {
 		log.errorf("SDL_AcquireGPUCommandBuffer failed: %s", sdl.GetError())
@@ -90,6 +97,11 @@ renderer_draw :: proc(r: ^Renderer, time: f32) {
 			resolution = {f32(w), f32(h)},
 			time       = time,
 		}
+
+		count := min(len(boxes), MAX_BOXES)
+		copy(uniforms.boxes[:], boxes[:count])
+		uniforms.boxes_count = u32(count)
+
 		sdl.PushGPUFragmentUniformData(cmd, 0, &uniforms, size_of(uniforms))
 
 		target := sdl.GPUColorTargetInfo {
@@ -98,11 +110,13 @@ renderer_draw :: proc(r: ^Renderer, time: f32) {
 			load_op     = .CLEAR,
 			store_op    = .STORE,
 		}
+
 		pass := sdl.BeginGPURenderPass(cmd, &target, 1, nil)
 		if r.pipeline != nil {
 			sdl.BindGPUGraphicsPipeline(pass, r.pipeline)
 			sdl.DrawGPUPrimitives(pass, 3, 1, 0, 0) // fullscreen triangle
 		}
+
 		sdl.EndGPURenderPass(pass)
 	}
 
