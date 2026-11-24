@@ -134,7 +134,7 @@ static const float3 GROUND_COLOR  = float3(0.6, 0.6, 0.6);
 
 // Smooth union strength. Shapes only affect each other within 6 * SMOOTH_K,
 // and blended surfaces bulge out by at most SMOOTH_K (see SCENE_BOUNDS_MARGIN in renderer.odin)
-static const float SMOOTH_K     = 0.05;
+static const float SMOOTH_K     = 0.25;
 static const float BLEND_RANGE  = 6.0 * SMOOTH_K;
 
 struct Surface {
@@ -230,6 +230,7 @@ float hard_shadow(float3 ro, float3 rd, float t_max) {
         if (d < SURF_EPS) return 0.0;
         t += d;
     }
+
     return 1.0;
 }
 

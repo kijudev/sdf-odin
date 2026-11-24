@@ -1,6 +1,7 @@
 package main
 
 import "core:log"
+import "core:math"
 import sdl "vendor:sdl3"
 
 main :: proc() {
@@ -37,7 +38,7 @@ main :: proc() {
 
 	lights := [?]Light {
 		light_directional({0.6, 0.8, 0.4}, {1.0, 0.95, 0.85}, 0.8),
-		light_point({-1.5, 1.5, 1.0}, {1.0, 0.5, 0.2}, 2.0),
+		light_point({-1.5, 1.5, 1.0}, {1.0, 0.5, 0.2}, 4.0),
 		light_point({1.5, 1.2, -1.0}, {0.2, 0.5, 1.0}, 2.0),
 	}
 
@@ -66,6 +67,15 @@ main :: proc() {
 		t := f32(now) / 1e9
 
 		camera_update(&camera, dt)
+
+		// sphere bounces
+		primitives[0].pos.y = 0.6 + abs(math.sin(t * 2.0)) * 0.8
+
+		// torus slides sideways into the box and capsule, so you can see them blend
+		primitives[2].pos.x = math.sin(t * 0.7) * 0.8
+
+		// capsule circles around its starting spot
+		primitives[3].pos.xz = {1.0 + math.cos(t) * 0.5, math.sin(t) * 0.5}
 
 		renderer_draw(&renderer, t, camera, primitives[:], lights[:])
 		free_all(context.temp_allocator)
