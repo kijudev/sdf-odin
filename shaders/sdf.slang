@@ -19,6 +19,17 @@ struct Sdf_Primitive {
     float bound_radius; // sphere around pos containing the whole shape
 };
 
+// Must match Light_Kind in renderer.odin
+static const uint LIGHT_DIRECTIONAL = 0;
+static const uint LIGHT_POINT       = 1;
+
+struct Light {
+    float3 pos_or_dir; // directional: normalized direction towards the light, point: position
+    uint kind;
+    float3 color;      // already multiplied by intensity
+    float _pad;
+};
+
 // Must match Gpu_Camera in camera.odin
 struct Gpu_Camera {
     float3 pos;
@@ -32,6 +43,7 @@ struct Gpu_Camera {
 };
 
 static const uint MAX_PRIMITIVES = 32;
+static const uint MAX_LIGHTS     = 8;
 
 struct Uniforms {
     float2 resolution;
@@ -39,10 +51,11 @@ struct Uniforms {
     uint primitive_count;
     Gpu_Camera camera;
     float3 bounds_min; // box around all primitives
-    float _pad0;
+    uint light_count;
     float3 bounds_max;
     float _pad1;
     Sdf_Primitive primitives[MAX_PRIMITIVES];
+    Light lights[MAX_LIGHTS];
 };
 
 [[vk::binding(0, 3)]]
@@ -205,17 +218,48 @@ float3 calc_normal(float3 p) {
         k.xxx * scene(p + k.xxx * h));
 }
 
-// 1.0 = lit, 0.0 = in shadow. Only the part of the ray inside the scene bounds can be occluded.
-float hard_shadow(float3 ro, float3 rd) {
+// 1.0 = lit, 0.0 = in shadow. Only checks up to t_max (the light's distance),
+// and only the part of the ray inside the scene bounds can be occluded.
+float hard_shadow(float3 ro, float3 rd, float t_max) {
     float2 span = ray_scene_bounds(ro, rd);
     float t     = max(span.x, 0.02);
+    float t_end = min(span.y, t_max);
 
-    for (int i = 0; i < 64 && t < span.y; i++) {
+    for (int i = 0; i < 64 && t < t_end; i++) {
         float d = scene(ro + rd * t);
         if (d < SURF_EPS) return 0.0;
         t += d;
     }
     return 1.0;
+}
+
+static const float3 AMBIENT_COLOR = float3(0.15, 0.2, 0.3);
+
+float3 shade(float3 p, float3 n, float3 albedo) {
+    float3 light = AMBIENT_COLOR * (0.5 + 0.5 * n.y); // sky fill, brighter facing up
+
+    for (uint i = 0; i < u.light_count; i++) {
+        Light l = u.lights[i];
+
+        float3 to_light    = l.pos_or_dir;
+        float  attenuation = 1.0;
+        float  light_dist  = MAX_DIST;
+
+        if (l.kind == LIGHT_POINT) {
+            float3 v    = l.pos_or_dir - p;
+            light_dist  = length(v);
+            to_light    = v / light_dist;
+            attenuation = 1.0 / (1.0 + light_dist * light_dist);
+        }
+
+        float n_dot_l = dot(n, to_light);
+        if (n_dot_l <= 0.0) continue; // facing away, no need for a shadow ray
+
+        float shadow = hard_shadow(p + n * 0.002, to_light, light_dist);
+        light += l.color * n_dot_l * attenuation * shadow;
+    }
+
+    return albedo * light;
 }
 
 [shader("fragment")]
@@ -242,11 +286,7 @@ float4 fragment_main(Vertex_Output input) : SV_Target {
         float3 n      = hit_obj ? calc_normal(p) : float3(0.0, 1.0, 0.0);
         float3 albedo = hit_obj ? scene_surface(p).color : GROUND_COLOR;
 
-        float3 light_dir = normalize(float3(0.6, 0.8, 0.4));
-        float diffuse = saturate(dot(n, light_dir)) * hard_shadow(p + n * 0.002, light_dir);
-        float ambient = 0.5 + 0.5 * n.y; // brighter facing up
-
-        col = albedo * (diffuse * float3(1.0, 0.95, 0.85) + ambient * float3(0.15, 0.2, 0.3));
+        col = shade(p, n, albedo);
 
         // fade to sky with distance
         col = lerp(col, sky, 1.0 - exp(-0.002 * t * t));

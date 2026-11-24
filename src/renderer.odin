@@ -6,6 +6,7 @@ import sdl "vendor:sdl3"
 
 SHADER_SRC :: "shaders/sdf.slang"
 MAX_PRIMITIVES :: 32
+MAX_LIGHTS :: 8
 
 // How far blended surfaces can bulge past the shapes. Must be >= SMOOTH_K in sdf.slang
 SCENE_BOUNDS_MARGIN :: 0.1
@@ -31,6 +32,22 @@ Sdf_Primitive :: struct {
 
 #assert(size_of(Sdf_Primitive) == 48)
 
+// Must match the LIGHT_* constants in sdf.slang
+Light_Kind :: enum u32 {
+	Directional,
+	Point,
+}
+
+// Layout matches Light in sdf.slang (32 bytes)
+Light :: struct {
+	pos_or_dir: [3]f32, // directional: normalized direction towards the light, point: position
+	kind:       Light_Kind,
+	color:      [3]f32, // already multiplied by intensity
+	_pad:       f32,
+}
+
+#assert(size_of(Light) == 32)
+
 Frag_Uniforms :: struct {
 	resolution:      [2]f32,
 	time:            f32,
@@ -38,10 +55,11 @@ Frag_Uniforms :: struct {
 	camera:          Gpu_Camera,
 	// box around every primitive, rays are clipped to it
 	bounds_min:      [3]f32,
-	_pad0:           f32,
+	light_count:     u32,
 	bounds_max:      [3]f32,
 	_pad1:           f32,
 	primitives:      [MAX_PRIMITIVES]Sdf_Primitive,
+	lights:          [MAX_LIGHTS]Light,
 }
 
 Color :: [3]f32
@@ -94,6 +112,14 @@ sdf_cylinder :: proc(pos: [3]f32, half_height, radius: f32, color: Color) -> Sdf
 		color = color,
 		bound_radius = linalg.length([2]f32{half_height, radius}),
 	}
+}
+
+light_directional :: proc(dir: [3]f32, color: Color, intensity: f32) -> Light {
+	return {pos_or_dir = linalg.normalize(dir), kind = .Directional, color = color * intensity}
+}
+
+light_point :: proc(pos: [3]f32, color: Color, intensity: f32) -> Light {
+	return {pos_or_dir = pos, kind = .Point, color = color * intensity}
 }
 
 Renderer :: struct {
@@ -156,7 +182,13 @@ renderer_reload_pipeline :: proc(r: ^Renderer) {
 	log.info("pipeline reloaded")
 }
 
-renderer_draw :: proc(r: ^Renderer, time: f32, camera: Camera, primitives: []Sdf_Primitive) {
+renderer_draw :: proc(
+	r: ^Renderer,
+	time: f32,
+	camera: Camera,
+	primitives: []Sdf_Primitive,
+	lights: []Light,
+) {
 	cmd := sdl.AcquireGPUCommandBuffer(r.device)
 	if cmd == nil {
 		log.errorf("SDL_AcquireGPUCommandBuffer failed: %s", sdl.GetError())
@@ -180,6 +212,10 @@ renderer_draw :: proc(r: ^Renderer, time: f32, camera: Camera, primitives: []Sdf
 		count := min(len(primitives), MAX_PRIMITIVES)
 		copy(uniforms.primitives[:], primitives[:count])
 		uniforms.primitive_count = u32(count)
+
+		light_count := min(len(lights), MAX_LIGHTS)
+		copy(uniforms.lights[:], lights[:light_count])
+		uniforms.light_count = u32(light_count)
 
 		uniforms.bounds_min = max(f32)
 		uniforms.bounds_max = min(f32)
