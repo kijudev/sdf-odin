@@ -1,10 +1,14 @@
 package main
 
 import "core:log"
+import "core:math/linalg"
 import sdl "vendor:sdl3"
 
 SHADER_SRC :: "shaders/sdf.slang"
 MAX_PRIMITIVES :: 32
+
+// How far blended surfaces can bulge past the shapes. Must be >= SMOOTH_K in sdf.slang
+SCENE_BOUNDS_MARGIN :: 0.1
 
 // Must match the KIND_* constants in sdf.slang
 Sdf_Kind :: enum u32 {
@@ -17,11 +21,12 @@ Sdf_Kind :: enum u32 {
 
 // Layout matches Sdf_Primitive in sdf.slang (48 bytes, std140 friendly)
 Sdf_Primitive :: struct {
-	pos:    [3]f32,
-	kind:   Sdf_Kind,
-	params: [4]f32,
-	color:  [3]f32,
-	_pad:   f32,
+	pos:          [3]f32,
+	kind:         Sdf_Kind,
+	params:       [4]f32,
+	color:        [3]f32,
+	// radius of a sphere around pos that fully contains the shape, lets the shader skip far shapes
+	bound_radius: f32,
 }
 
 #assert(size_of(Sdf_Primitive) == 48)
@@ -31,29 +36,64 @@ Frag_Uniforms :: struct {
 	time:            f32,
 	primitive_count: u32,
 	camera:          Gpu_Camera,
+	// box around every primitive, rays are clipped to it
+	bounds_min:      [3]f32,
+	_pad0:           f32,
+	bounds_max:      [3]f32,
+	_pad1:           f32,
 	primitives:      [MAX_PRIMITIVES]Sdf_Primitive,
 }
 
 Color :: [3]f32
 
 sdf_sphere :: proc(pos: [3]f32, radius: f32, color: Color) -> Sdf_Primitive {
-	return {pos = pos, kind = .Sphere, params = {radius, 0, 0, 0}, color = color}
+	return {
+		pos = pos,
+		kind = .Sphere,
+		params = {radius, 0, 0, 0},
+		color = color,
+		bound_radius = radius,
+	}
 }
 
 sdf_box :: proc(pos: [3]f32, half_extents: [3]f32, color: Color) -> Sdf_Primitive {
-	return {pos = pos, kind = .Box, params = {half_extents.x, half_extents.y, half_extents.z, 0}, color = color}
+	return {
+		pos = pos,
+		kind = .Box,
+		params = {half_extents.x, half_extents.y, half_extents.z, 0},
+		color = color,
+		bound_radius = linalg.length(half_extents),
+	}
 }
 
 sdf_torus :: proc(pos: [3]f32, major_radius, minor_radius: f32, color: Color) -> Sdf_Primitive {
-	return {pos = pos, kind = .Torus, params = {major_radius, minor_radius, 0, 0}, color = color}
+	return {
+		pos = pos,
+		kind = .Torus,
+		params = {major_radius, minor_radius, 0, 0},
+		color = color,
+		bound_radius = major_radius + minor_radius,
+	}
 }
 
 sdf_capsule :: proc(pos: [3]f32, half_height, radius: f32, color: Color) -> Sdf_Primitive {
-	return {pos = pos, kind = .Capsule, params = {half_height, radius, 0, 0}, color = color}
+	return {
+		pos = pos,
+		kind = .Capsule,
+		params = {half_height, radius, 0, 0},
+		color = color,
+		bound_radius = half_height + radius,
+	}
 }
 
 sdf_cylinder :: proc(pos: [3]f32, half_height, radius: f32, color: Color) -> Sdf_Primitive {
-	return {pos = pos, kind = .Cylinder, params = {half_height, radius, 0, 0}, color = color}
+	return {
+		pos = pos,
+		kind = .Cylinder,
+		params = {half_height, radius, 0, 0},
+		color = color,
+		bound_radius = linalg.length([2]f32{half_height, radius}),
+	}
 }
 
 Renderer :: struct {
@@ -140,6 +180,14 @@ renderer_draw :: proc(r: ^Renderer, time: f32, camera: Camera, primitives: []Sdf
 		count := min(len(primitives), MAX_PRIMITIVES)
 		copy(uniforms.primitives[:], primitives[:count])
 		uniforms.primitive_count = u32(count)
+
+		uniforms.bounds_min = max(f32)
+		uniforms.bounds_max = min(f32)
+		for prim in primitives[:count] {
+			extent := prim.bound_radius + SCENE_BOUNDS_MARGIN
+			uniforms.bounds_min = linalg.min(uniforms.bounds_min, prim.pos - extent)
+			uniforms.bounds_max = linalg.max(uniforms.bounds_max, prim.pos + extent)
+		}
 
 		sdl.PushGPUFragmentUniformData(cmd, 0, &uniforms, size_of(uniforms))
 
