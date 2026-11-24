@@ -4,18 +4,56 @@ import "core:log"
 import sdl "vendor:sdl3"
 
 SHADER_SRC :: "shaders/sdf.slang"
-MAX_BOXES :: 16
+MAX_PRIMITIVES :: 32
 
-Sdf_Box :: struct {
-	pos:  [2]f32,
-	size: [2]f32,
+// Must match the KIND_* constants in sdf.slang
+Sdf_Kind :: enum u32 {
+	Sphere,
+	Box,
+	Torus,
+	Capsule,
+	Cylinder,
 }
 
+// Layout matches Sdf_Primitive in sdf.slang (48 bytes, std140 friendly)
+Sdf_Primitive :: struct {
+	pos:    [3]f32,
+	kind:   Sdf_Kind,
+	params: [4]f32,
+	color:  [3]f32,
+	_pad:   f32,
+}
+
+#assert(size_of(Sdf_Primitive) == 48)
+
 Frag_Uniforms :: struct {
-	resolution:  [2]f32,
-	time:        f32,
-	boxes_count: u32,
-	boxes:       [MAX_BOXES]Sdf_Box,
+	resolution:      [2]f32,
+	time:            f32,
+	primitive_count: u32,
+	camera:          Gpu_Camera,
+	primitives:      [MAX_PRIMITIVES]Sdf_Primitive,
+}
+
+Color :: [3]f32
+
+sdf_sphere :: proc(pos: [3]f32, radius: f32, color: Color) -> Sdf_Primitive {
+	return {pos = pos, kind = .Sphere, params = {radius, 0, 0, 0}, color = color}
+}
+
+sdf_box :: proc(pos: [3]f32, half_extents: [3]f32, color: Color) -> Sdf_Primitive {
+	return {pos = pos, kind = .Box, params = {half_extents.x, half_extents.y, half_extents.z, 0}, color = color}
+}
+
+sdf_torus :: proc(pos: [3]f32, major_radius, minor_radius: f32, color: Color) -> Sdf_Primitive {
+	return {pos = pos, kind = .Torus, params = {major_radius, minor_radius, 0, 0}, color = color}
+}
+
+sdf_capsule :: proc(pos: [3]f32, half_height, radius: f32, color: Color) -> Sdf_Primitive {
+	return {pos = pos, kind = .Capsule, params = {half_height, radius, 0, 0}, color = color}
+}
+
+sdf_cylinder :: proc(pos: [3]f32, half_height, radius: f32, color: Color) -> Sdf_Primitive {
+	return {pos = pos, kind = .Cylinder, params = {half_height, radius, 0, 0}, color = color}
 }
 
 Renderer :: struct {
@@ -78,7 +116,7 @@ renderer_reload_pipeline :: proc(r: ^Renderer) {
 	log.info("pipeline reloaded")
 }
 
-renderer_draw :: proc(r: ^Renderer, time: f32, boxes: []Sdf_Box) {
+renderer_draw :: proc(r: ^Renderer, time: f32, camera: Camera, primitives: []Sdf_Primitive) {
 	cmd := sdl.AcquireGPUCommandBuffer(r.device)
 	if cmd == nil {
 		log.errorf("SDL_AcquireGPUCommandBuffer failed: %s", sdl.GetError())
@@ -96,11 +134,12 @@ renderer_draw :: proc(r: ^Renderer, time: f32, boxes: []Sdf_Box) {
 		uniforms := Frag_Uniforms {
 			resolution = {f32(w), f32(h)},
 			time       = time,
+			camera     = camera_to_gpu(camera),
 		}
 
-		count := min(len(boxes), MAX_BOXES)
-		copy(uniforms.boxes[:], boxes[:count])
-		uniforms.boxes_count = u32(count)
+		count := min(len(primitives), MAX_PRIMITIVES)
+		copy(uniforms.primitives[:], primitives[:count])
+		uniforms.primitive_count = u32(count)
 
 		sdl.PushGPUFragmentUniformData(cmd, 0, &uniforms, size_of(uniforms))
 

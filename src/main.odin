@@ -1,7 +1,6 @@
 package main
 
 import "core:log"
-import "core:math"
 import sdl "vendor:sdl3"
 
 main :: proc() {
@@ -22,7 +21,21 @@ main :: proc() {
 	renderer_init(&renderer, window)
 	defer renderer_destroy(&renderer)
 
-	boxes: [3]Sdf_Box
+	camera := Camera {
+		pos          = {0, 1.5, 5},
+		pitch        = -0.2,
+		focal_length = 1.5,
+	}
+
+	primitives := [?]Sdf_Primitive {
+		sdf_sphere({-2.0, 0.6, 0.0}, 0.5, {0.9, 0.3, 0.3}),
+		sdf_box({-1.0, 0.4, 0.0}, {0.35, 0.35, 0.35}, {0.3, 0.8, 0.4}),
+		sdf_torus({0.0, 0.6, 0.0}, 0.4, 0.12, {0.3, 0.5, 0.9}),
+		sdf_capsule({1.0, 0.7, 0.0}, 0.3, 0.25, {0.9, 0.8, 0.3}),
+		sdf_cylinder({2.0, 0.5, 0.0}, 0.5, 0.3, {0.7, 0.4, 0.9}),
+	}
+
+	last_ticks := sdl.GetTicksNS()
 
 	main_loop: for {
 		ev: sdl.Event
@@ -33,21 +46,22 @@ main :: proc() {
 			case .KEY_DOWN:
 				if ev.key.key == sdl.K_ESCAPE do break main_loop
 			}
+
+			camera_handle_event(&camera, window, ev)
 		}
 
 		if shader_watch_changed(&renderer.watch) {
 			renderer_reload_pipeline(&renderer)
 		}
 
-		t := f32(sdl.GetTicks()) / 1000.0
+		now := sdl.GetTicksNS()
+		dt := f32(now - last_ticks) / 1e9
+		last_ticks = now
+		t := f32(now) / 1e9
 
-		for &b, i in boxes {
-			fi := f32(i)
-			b.pos = {(fi - 1) * 0.6, math.sin(t + fi) * 0.4}
-			b.size = {0.15, 0.15}
-		}
+		camera_update(&camera, dt)
 
-		renderer_draw(&renderer, t, boxes[:])
+		renderer_draw(&renderer, t, camera, primitives[:])
 		free_all(context.temp_allocator)
 	}
 }
