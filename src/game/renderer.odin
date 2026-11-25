@@ -1,5 +1,6 @@
-package main
+package game
 
+import "../../libs/ecs"
 import "core:log"
 import "core:math/linalg"
 import sdl "vendor:sdl3"
@@ -8,118 +9,39 @@ SHADER_SRC :: "shaders/sdf.slang"
 MAX_PRIMITIVES :: 32
 MAX_LIGHTS :: 8
 
-// How far blended surfaces can bulge past the shapes. Must be >= SMOOTH_K in sdf.slang
+// How far blended surfaces can bulge past the shapes. Must be >= SMOOTH_K in sdf.slang.
 SCENE_BOUNDS_MARGIN :: 0.1
 
-// Must match the KIND_* constants in sdf.slang
-Sdf_Kind :: enum u32 {
-	Sphere,
-	Box,
-	Torus,
-	Capsule,
-	Cylinder,
-}
-
-// Layout matches Sdf_Primitive in sdf.slang (48 bytes, std140 friendly)
 Sdf_Primitive :: struct {
-	pos:          [3]f32,
-	kind:         Sdf_Kind,
-	params:       [4]f32,
-	color:        [3]f32,
-	// radius of a sphere around pos that fully contains the shape, lets the shader skip far shapes
+	pos:          Vec3,
+	kind:         Shape_Kind,
+	params:       Vec4,
+	color:        Color,
 	bound_radius: f32,
 }
 
 #assert(size_of(Sdf_Primitive) == 48)
 
-// Must match the LIGHT_* constants in sdf.slang
-Light_Kind :: enum u32 {
-	Directional,
-	Point,
-}
-
-// Layout matches Light in sdf.slang (32 bytes)
-Light :: struct {
-	pos_or_dir: [3]f32, // directional: normalized direction towards the light, point: position
+Gpu_Light :: struct {
+	pos_or_dir: Vec3,
 	kind:       Light_Kind,
-	color:      [3]f32, // already multiplied by intensity
+	color:      Color,
 	_pad:       f32,
 }
 
-#assert(size_of(Light) == 32)
+#assert(size_of(Gpu_Light) == 32)
 
 Frag_Uniforms :: struct {
-	resolution:      [2]f32,
+	resolution:      Vec2,
 	time:            f32,
 	primitive_count: u32,
 	camera:          Gpu_Camera,
-	// box around every primitive, rays are clipped to it
-	bounds_min:      [3]f32,
+	bounds_min:      Vec3,
 	light_count:     u32,
-	bounds_max:      [3]f32,
+	bounds_max:      Vec3,
 	_pad1:           f32,
 	primitives:      [MAX_PRIMITIVES]Sdf_Primitive,
-	lights:          [MAX_LIGHTS]Light,
-}
-
-Color :: [3]f32
-
-sdf_sphere :: proc(pos: [3]f32, radius: f32, color: Color) -> Sdf_Primitive {
-	return {
-		pos = pos,
-		kind = .Sphere,
-		params = {radius, 0, 0, 0},
-		color = color,
-		bound_radius = radius,
-	}
-}
-
-sdf_box :: proc(pos: [3]f32, half_extents: [3]f32, color: Color) -> Sdf_Primitive {
-	return {
-		pos = pos,
-		kind = .Box,
-		params = {half_extents.x, half_extents.y, half_extents.z, 0},
-		color = color,
-		bound_radius = linalg.length(half_extents),
-	}
-}
-
-sdf_torus :: proc(pos: [3]f32, major_radius, minor_radius: f32, color: Color) -> Sdf_Primitive {
-	return {
-		pos = pos,
-		kind = .Torus,
-		params = {major_radius, minor_radius, 0, 0},
-		color = color,
-		bound_radius = major_radius + minor_radius,
-	}
-}
-
-sdf_capsule :: proc(pos: [3]f32, half_height, radius: f32, color: Color) -> Sdf_Primitive {
-	return {
-		pos = pos,
-		kind = .Capsule,
-		params = {half_height, radius, 0, 0},
-		color = color,
-		bound_radius = half_height + radius,
-	}
-}
-
-sdf_cylinder :: proc(pos: [3]f32, half_height, radius: f32, color: Color) -> Sdf_Primitive {
-	return {
-		pos = pos,
-		kind = .Cylinder,
-		params = {half_height, radius, 0, 0},
-		color = color,
-		bound_radius = linalg.length([2]f32{half_height, radius}),
-	}
-}
-
-light_directional :: proc(dir: [3]f32, color: Color, intensity: f32) -> Light {
-	return {pos_or_dir = linalg.normalize(dir), kind = .Directional, color = color * intensity}
-}
-
-light_point :: proc(pos: [3]f32, color: Color, intensity: f32) -> Light {
-	return {pos_or_dir = pos, kind = .Point, color = color * intensity}
+	lights:          [MAX_LIGHTS]Gpu_Light,
 }
 
 Renderer :: struct {
@@ -145,6 +67,7 @@ renderer_init :: proc(r: ^Renderer, window: ^sdl.Window) {
 }
 
 renderer_destroy :: proc(r: ^Renderer) {
+	if r.device == nil do return
 	if r.pipeline != nil do sdl.ReleaseGPUGraphicsPipeline(r.device, r.pipeline)
 	sdl.ReleaseWindowFromGPUDevice(r.device, r.window)
 	sdl.DestroyGPUDevice(r.device)
@@ -185,9 +108,9 @@ renderer_reload_pipeline :: proc(r: ^Renderer) {
 renderer_draw :: proc(
 	r: ^Renderer,
 	time: f32,
-	camera: Camera,
+	camera: Gpu_Camera,
 	primitives: []Sdf_Primitive,
-	lights: []Light,
+	lights: []Gpu_Light,
 ) {
 	cmd := sdl.AcquireGPUCommandBuffer(r.device)
 	if cmd == nil {
@@ -206,7 +129,7 @@ renderer_draw :: proc(
 		uniforms := Frag_Uniforms {
 			resolution = {f32(w), f32(h)},
 			time       = time,
-			camera     = camera_to_gpu(camera),
+			camera     = camera,
 		}
 
 		count := min(len(primitives), MAX_PRIMITIVES)
@@ -244,4 +167,86 @@ renderer_draw :: proc(
 	}
 
 	_ = sdl.SubmitGPUCommandBuffer(cmd)
+}
+
+write_renderer :: proc(stuff: Stuff) -> ^Renderer {
+	return ecs.write_stash(stuff, .Renderer, Renderer)
+}
+
+// >-------------------------------------------------------------------- Systems
+
+// Stage:  Render.
+// Reads:  -.
+// Writes: Renderer.
+shader_reload_system :: proc(stuff: Stuff) {
+	renderer := write_renderer(stuff)
+	if shader_watch_changed(&renderer.watch) do renderer_reload_pipeline(renderer)
+}
+
+// Draws from the first camera, nothing if there is none.
+// Stage:  Render.
+// Reads:  Time, Camera, Transform, Shape, Light.
+// Writes: Renderer.
+render_system :: proc(stuff: Stuff) {
+	camera_query := ecs.query_make(stuff, {.Camera, .Transform}, {})
+	if _, ok := ecs.query_iter(&camera_query); !ok do return
+	camera := ecs.get_part(&camera_query, .Camera, Camera)
+	gpu_camera := Gpu_Camera {
+		pos          = ecs.get_part(&camera_query, .Transform, Transform).pos,
+		focal_length = camera.focal_length,
+		forward      = camera_forward(camera),
+		right        = camera_right(camera),
+		up           = camera_up(camera),
+	}
+
+	primitives: [MAX_PRIMITIVES]Sdf_Primitive
+	primitive_count := 0
+
+	shape_query := ecs.query_make(stuff, {.Shape, .Transform}, {})
+	for _ in ecs.query_iter(&shape_query) {
+		if primitive_count == MAX_PRIMITIVES do break
+
+		shape := ecs.get_part(&shape_query, .Shape, Shape)
+		primitives[primitive_count] = {
+			pos          = ecs.get_part(&shape_query, .Transform, Transform).pos,
+			kind         = shape.kind,
+			params       = shape.params,
+			color        = shape.color,
+			bound_radius = shape_bound_radius(shape),
+		}
+		primitive_count += 1
+	}
+
+	lights: [MAX_LIGHTS]Gpu_Light
+	light_count := 0
+
+	light_query := ecs.query_make(stuff, {.Light}, {})
+	for thing in ecs.query_iter(&light_query) {
+		if light_count == MAX_LIGHTS do break
+
+		light := ecs.get_part(&light_query, .Light, Light)
+		pos_or_dir: Vec3
+		switch light.kind {
+		case .Directional:
+			pos_or_dir = linalg.normalize(light.dir)
+		case .Point:
+			transform, _ := ecs.get_part(stuff, thing, .Transform, Transform)
+			pos_or_dir = transform.pos
+		}
+
+		lights[light_count] = {
+			pos_or_dir = pos_or_dir,
+			kind       = light.kind,
+			color      = light.color * light.intensity,
+		}
+		light_count += 1
+	}
+
+	renderer_draw(
+		write_renderer(stuff),
+		get_time(stuff).t,
+		gpu_camera,
+		primitives[:primitive_count],
+		lights[:light_count],
+	)
 }

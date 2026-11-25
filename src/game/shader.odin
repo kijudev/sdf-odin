@@ -1,4 +1,4 @@
-package main
+package game
 
 import "core:fmt"
 import "core:log"
@@ -23,7 +23,7 @@ shader_watch_changed :: proc(w: ^Shader_Watch) -> bool {
 	return true
 }
 
-slang_compile :: proc(src, entry, stage, out_path: string) -> bool {
+shader_compile :: proc(src, entry, stage, out_path: string) -> bool {
 	state, stdout, stderr, err := os.process_exec(
 		{
 			command = {
@@ -75,7 +75,7 @@ shader_compile_and_load :: proc(
 	stem := filepath.stem(src)
 	out_path := fmt.tprintf("%s/%s.%s.spv", SHADER_OUT_DIR, stem, entry)
 
-	if !slang_compile(src, entry, slang_stage, out_path) do return nil
+	if !shader_compile(src, entry, slang_stage, out_path) do return nil
 
 	code, err := os.read_entire_file(out_path, context.temp_allocator)
 	if err != nil {

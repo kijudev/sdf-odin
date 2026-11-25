@@ -1,4 +1,4 @@
-// Must match Sdf_Kind in renderer.odin
+// Must match Shape_Kind in game/shape.odin
 static const uint KIND_SPHERE   = 0;
 static const uint KIND_BOX      = 1;
 static const uint KIND_TORUS    = 2;
@@ -19,7 +19,7 @@ struct Sdf_Primitive {
     float bound_radius; // sphere around pos containing the whole shape
 };
 
-// Must match Light_Kind in renderer.odin
+// Must match Light_Kind in game/light.odin
 static const uint LIGHT_DIRECTIONAL = 0;
 static const uint LIGHT_POINT       = 1;
 
@@ -30,7 +30,7 @@ struct Light {
     float _pad;
 };
 
-// Must match Gpu_Camera in camera.odin
+// Must match Gpu_Camera in game/camera.odin
 struct Gpu_Camera {
     float3 pos;
     float focal_length;
@@ -133,7 +133,7 @@ static const float  GROUND_HEIGHT = 0.0;
 static const float3 GROUND_COLOR  = float3(0.6, 0.6, 0.6);
 
 // Smooth union strength. Shapes only affect each other within 6 * SMOOTH_K,
-// and blended surfaces bulge out by at most SMOOTH_K (see SCENE_BOUNDS_MARGIN in renderer.odin)
+// and blended surfaces bulge out by at most SMOOTH_K (see SCENE_BOUNDS_MARGIN in game/renderer.odin)
 static const float SMOOTH_K     = 0.25;
 static const float BLEND_RANGE  = 6.0 * SMOOTH_K;
 

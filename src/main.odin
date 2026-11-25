@@ -1,7 +1,7 @@
 package main
 
 import "core:log"
-import "core:math"
+import "game"
 import sdl "vendor:sdl3"
 
 main :: proc() {
@@ -18,33 +18,16 @@ main :: proc() {
 	}
 	defer sdl.DestroyWindow(window)
 
-	renderer: Renderer
-	renderer_init(&renderer, window)
-	defer renderer_destroy(&renderer)
+	world: game.World
+	game.game_init(&world, window)
+	defer game.game_destroy(&world)
 
-	camera := Camera {
-		pos          = {0, 1.5, 5},
-		pitch        = -0.2,
-		focal_length = 1.5,
-	}
-
-	primitives := [?]Sdf_Primitive {
-		sdf_sphere({-2.0, 0.6, 0.0}, 0.5, {0.9, 0.3, 0.3}),
-		sdf_box({-1.0, 0.4, 0.0}, {0.35, 0.35, 0.35}, {0.3, 0.8, 0.4}),
-		sdf_torus({0.0, 0.6, 0.0}, 0.4, 0.12, {0.3, 0.5, 0.9}),
-		sdf_capsule({1.0, 0.7, 0.0}, 0.3, 0.25, {0.9, 0.8, 0.3}),
-		sdf_cylinder({2.0, 0.5, 0.0}, 0.5, 0.3, {0.7, 0.4, 0.9}),
-	}
-
-	lights := [?]Light {
-		light_directional({0.6, 0.8, 0.4}, {1.0, 0.95, 0.85}, 0.8),
-		light_point({-1.5, 1.5, 1.0}, {1.0, 0.5, 0.2}, 4.0),
-		light_point({1.5, 1.2, -1.0}, {0.2, 0.5, 1.0}, 2.0),
-	}
-
-	last_ticks := sdl.GetTicksNS()
+	events := make([dynamic]sdl.Event)
+	defer delete(events)
 
 	main_loop: for {
+		clear(&events)
+
 		ev: sdl.Event
 		for sdl.PollEvent(&ev) {
 			#partial switch ev.type {
@@ -54,30 +37,10 @@ main :: proc() {
 				if ev.key.key == sdl.K_ESCAPE do break main_loop
 			}
 
-			camera_handle_event(&camera, window, ev)
+			append(&events, ev)
 		}
 
-		if shader_watch_changed(&renderer.watch) {
-			renderer_reload_pipeline(&renderer)
-		}
-
-		now := sdl.GetTicksNS()
-		dt := f32(now - last_ticks) / 1e9
-		last_ticks = now
-		t := f32(now) / 1e9
-
-		camera_update(&camera, dt)
-
-		// sphere bounces
-		primitives[0].pos.y = 0.6 + abs(math.sin(t * 2.0)) * 0.8
-
-		// torus slides sideways into the box and capsule, so you can see them blend
-		primitives[2].pos.x = math.sin(t * 0.7) * 0.8
-
-		// capsule circles around its starting spot
-		primitives[3].pos.xz = {1.0 + math.cos(t) * 0.5, math.sin(t) * 0.5}
-
-		renderer_draw(&renderer, t, camera, primitives[:], lights[:])
+		game.game_frame(&world, events[:])
 		free_all(context.temp_allocator)
 	}
 }
