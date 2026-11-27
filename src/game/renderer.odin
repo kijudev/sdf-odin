@@ -69,6 +69,7 @@ renderer_init :: proc(r: ^Renderer, window: ^sdl.Window) {
 renderer_destroy :: proc(r: ^Renderer) {
 	if r.device == nil do return
 	if r.pipeline != nil do sdl.ReleaseGPUGraphicsPipeline(r.device, r.pipeline)
+
 	sdl.ReleaseWindowFromGPUDevice(r.device, r.window)
 	sdl.DestroyGPUDevice(r.device)
 }
@@ -85,6 +86,7 @@ renderer_reload_pipeline :: proc(r: ^Renderer) {
 	color_desc := sdl.GPUColorTargetDescription {
 		format = sdl.GetGPUSwapchainTextureFormat(r.device, r.window),
 	}
+
 	pipeline := sdl.CreateGPUGraphicsPipeline(
 		r.device,
 		{
@@ -190,6 +192,7 @@ shader_reload_system :: proc(stuff: Stuff) {
 render_system :: proc(stuff: Stuff) {
 	camera_query := ecs.query_make(stuff, {.Camera, .Transform}, {})
 	if _, ok := ecs.query_iter(&camera_query); !ok do return
+
 	camera := ecs.get_part(&camera_query, .Camera, Camera)
 	gpu_camera := Gpu_Camera {
 		pos          = ecs.get_part(&camera_query, .Transform, Transform).pos,
@@ -214,6 +217,7 @@ render_system :: proc(stuff: Stuff) {
 			color        = shape.color,
 			bound_radius = shape_bound_radius(shape),
 		}
+
 		primitive_count += 1
 	}
 
@@ -226,6 +230,7 @@ render_system :: proc(stuff: Stuff) {
 
 		light := ecs.get_part(&light_query, .Light, Light)
 		pos_or_dir: Vec3
+
 		switch light.kind {
 		case .Directional:
 			pos_or_dir = linalg.normalize(light.dir)
@@ -239,6 +244,7 @@ render_system :: proc(stuff: Stuff) {
 			kind       = light.kind,
 			color      = light.color * light.intensity,
 		}
+
 		light_count += 1
 	}
 

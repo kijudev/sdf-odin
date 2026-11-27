@@ -39,7 +39,6 @@ time_system :: proc(stuff: Stuff) {
 
 // >--------------------------------------------------------------- Events Stash
 
-// This frame's SDL events, filled by the main loop before the stages run.
 Events :: struct {
 	list: [dynamic]sdl.Event,
 }

@@ -6,16 +6,11 @@ import sdl "vendor:sdl3"
 
 main :: proc() {
 	context.logger = log.create_console_logger()
-
-	if !sdl.Init({.VIDEO}) {
-		log.panicf("SDL_Init failed: %s", sdl.GetError())
-	}
+	if !sdl.Init({.VIDEO}) do log.panicf("SDL_Init failed: %s", sdl.GetError())
 	defer sdl.Quit()
 
 	window := sdl.CreateWindow("sdf-odin", 1280, 720, {.RESIZABLE, .HIGH_PIXEL_DENSITY})
-	if window == nil {
-		log.panicf("SDL_CreateWindow failed: %s", sdl.GetError())
-	}
+	if window == nil do log.panicf("SDL_CreateWindow failed: %s", sdl.GetError())
 	defer sdl.DestroyWindow(window)
 
 	world: game.World

@@ -95,9 +95,7 @@ shader_compile_and_load :: proc(
 		},
 	)
 
-	if shader == nil {
-		log.errorf("SDL_CreateGPUShader failed for %s: %s", out_path, sdl.GetError())
-	}
+	if shader == nil do log.errorf("SDL_CreateGPUShader failed for %s: %s", out_path, sdl.GetError())
 
 	return shader
 }

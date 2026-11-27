@@ -61,7 +61,7 @@ game_init :: proc(world: ^World, window: ^sdl.Window) {
 		{.Renderer},
 	)
 
-	scene_spawn(ecs.stuff_make(world))
+	game_spawn_scene(ecs.stuff_make(world))
 }
 
 game_frame :: proc(world: ^World, events: []sdl.Event) {
@@ -76,7 +76,7 @@ game_destroy :: proc(world: ^World) {
 	ecs.world_destroy(world)
 }
 
-scene_spawn :: proc(stuff: Stuff) {
+game_spawn_scene :: proc(stuff: Stuff) {
 	camera_spawn(stuff, {0, 1.5, 5}, {0, 0.5, 0})
 
 	sphere := shape_spawn(stuff, {-2.0, 0.6, 0.0}, shape_sphere(0.5, {0.9, 0.3, 0.3}))
