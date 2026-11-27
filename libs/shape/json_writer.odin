@@ -1,537 +1,300 @@
 package shape
 
-import "base:runtime"
 import "core:math"
-import "core:reflect"
 import "core:strconv"
-import "core:unicode/utf16"
+import "core:strings"
 import "core:unicode/utf8"
 
-Json_Writer_Error :: enum u8 {
-	None,
-	Parse_Field,
-	Parse_Separator,
-	Parse_Signed_Int,
-	Parse_Unsigned_Int,
-	Parse_Float,
-	Parse_Bool,
-	Parse_Enum,
-	Parse_String,
-	Parse_Struct,
-	Parse_Array,
-	Parse_Map,
-	Out_Of_Range,
-}
+MAX_JSON_INLINE_ARRAY :: 4
 
-// JSON syntax writer that parses a string into the walked value. It consumes the source in
-// walk order, so struct fields must appear in declaration order. The first error sticks and
-// turns every later step into a no-op, `pos` is left at the point of failure.
+JSON_WRITER_CAPACITY :: 4096
+JSON_WRITER_PRETTY :: false
+JSON_WRITER_TABSIZE: u8 : 4
+
+// Writes nodes as JSON into a string.
+//
+// - structs and bit_fields are objects, fields in declaration order
+// - arrays are arrays, enumerated arrays included
+// - maps are objects, primitive keys are stringified (`{"Capsule": ..., "42": ...}`)
+// - bit sets are arrays of their members
+// - unions are an object with a single key naming the variant, nil is `null`
+// - enums are their member name, or an integer when the value has no named member
+// - runes are one character strings
+// - NaN and infinite floats, and unsupported types, are `null`
 Json_Writer :: struct {
-	using base: Visitor,
-	src:        string,
-	pos:        int,
-	depth:      int,
-	has_items:  bool,
-	err:        Json_Writer_Error,
+	builder:  strings.Builder,
+	pretty:   bool,
+	tabsize:  u8,
+	depth:    int,
+
+	// Optional, called before every value, returning true means it wrote the value itself.
+	override: proc(w: ^Json_Writer, n: Node) -> bool,
 }
 
-json_writer_init :: proc(w: ^Json_Writer, src: string, allocator := context.allocator) {
-	w.base = Visitor {
-		mode         = .Write,
-		struct_begin = json_writer_struct_begin,
-		struct_end   = json_writer_struct_end,
-		array_begin  = json_writer_array_begin,
-		array_end    = json_writer_array_end,
-		map_begin    = json_writer_map_begin,
-		map_end      = json_writer_map_end,
-		string_begin = json_writer_string_begin,
-		string_end   = json_writer_string_end,
-		primitive    = json_writer_primitive,
-		allocator    = allocator,
-	}
-
-	w.src = src
-	w.pos = 0
+json_writer_init :: proc(
+	w: ^Json_Writer,
+	capacity := JSON_WRITER_CAPACITY,
+	pretty := JSON_WRITER_PRETTY,
+	tabsize := JSON_WRITER_TABSIZE,
+	allocator := context.allocator,
+) {
+	w.pretty = pretty
+	w.tabsize = tabsize
 	w.depth = 0
-	w.has_items = false
-	w.err = .None
+	strings.builder_init(&w.builder, 0, capacity, allocator)
 }
+
+json_writer_destroy :: proc(w: ^Json_Writer) {strings.builder_destroy(&w.builder)}
 
 json_writer_reset :: proc(w: ^Json_Writer) {
-	w.pos = 0
+	strings.builder_reset(&w.builder)
 	w.depth = 0
-	w.has_items = false
-	w.err = .None
 }
 
-// Parses `src` into `value` in one call, `pos` is where parsing stopped.
+json_writer_string :: proc(w: ^Json_Writer) -> string {return strings.to_string(w.builder)}
+
+// Serializes `value` in one call, the result is cloned with `allocator` before the writer is
+// destroyed.
 json_write :: proc(
 	value: ^$T,
-	src: string,
+	capacity := JSON_WRITER_CAPACITY,
+	pretty := JSON_WRITER_PRETTY,
+	tabsize := JSON_WRITER_TABSIZE,
 	allocator := context.allocator,
-) -> (
-	err: Json_Writer_Error,
-	pos: int,
-) {
+) -> string {
 	w: Json_Writer
-	json_writer_init(&w, src, allocator)
+	json_writer_init(&w, capacity, pretty, tabsize, allocator)
+	defer json_writer_destroy(&w)
 
-	walk(&w, "", value, T)
-	return w.err, w.pos
+	json_write_node(&w, node_of(value))
+	return strings.clone(json_writer_string(&w), allocator)
 }
 
-// >-------------------------------------------------------------------- Actions
+json_write_node :: proc(w: ^Json_Writer, n: Node) {
+	if w.override != nil && w.override(w, n) do return
 
-json_writer_struct_begin :: proc(v: ^Visitor, name: string, info: ^runtime.Type_Info) -> bool {
-	w := (^Json_Writer)(v)
-	open(w, name, '{', .Parse_Struct)
-	return w.err == .None
-}
+	switch v in n.value {
+	case Struct:
+		first := true
+		open(w, '{')
+		it := 0
+		for f in iterate_fields(v, &it) {
+			item(w, &first, false)
+			write_name(w, f.name)
+			json_write_node(w, f)
+		}
+		close(w, '}', first, false)
 
-json_writer_struct_end :: proc(v: ^Visitor) {close((^Json_Writer)(v), '}', .Parse_Struct)}
+	case Array:
+		count := array_length(v)
+		inline := count <= MAX_JSON_INLINE_ARRAY && count > 0 && is_primitive(elem(v, 0).value)
 
-json_writer_array_begin :: proc(
-	v: ^Visitor,
-	name: string,
-	info: ^runtime.Type_Info,
-	elem: ^runtime.Type_Info,
-	count: ^int,
-) -> bool {
-	w := (^Json_Writer)(v)
-	open(w, name, '[', .Parse_Array)
+		first := true
+		open(w, '[')
+		it: Elem_Iterator
+		for e in iterate_elems(v, &it) {
+			item(w, &first, inline)
+			json_write_node(w, e)
+		}
+		close(w, ']', first, inline)
 
-	items := count_items(w)
-	if fixed, ok := runtime.type_info_base(info).variant.(runtime.Type_Info_Array); ok {
-		if items != fixed.count do fail(w, .Parse_Array)
+	case Bit_Set:
+		bits := load_bits(v.data, int(v.size))
+		inline := count_ones(bits) <= MAX_JSON_INLINE_ARRAY
+
+		first := true
+		open(w, '[')
+		for rest := bits; rest != 0; rest &= rest - 1 {
+			item(w, &first, inline)
+			// Members go out as values of the element type, so enums get their names
+			member := u128(i128(v.lower) + i128(lowest_one(rest)))
+			json_write_node(w, node_from(&member, v.elem))
+		}
+		close(w, ']', first, inline)
+
+	case Map:
+		first := true
+		open(w, '{')
+		it := 0
+		for key, value in iterate_map(v, &it) {
+			item(w, &first, false)
+			write_key(w, key)
+			strings.write_string(&w.builder, w.pretty ? ": " : ":")
+			json_write_node(w, value)
+		}
+		close(w, '}', first, false)
+
+	case Union:
+		index, payload := variant(v)
+		if index < 0 {
+			strings.write_string(&w.builder, "null")
+			return
+		}
+
+		buffer: [128]byte
+		first := true
+		open(w, '{')
+		item(w, &first, false)
+		write_name(w, variant_name(v, index, buffer[:]))
+		json_write_node(w, payload)
+		close(w, '}', first, false)
+
+	case String:
+		write_quoted(w, get_string(v))
+
+	case Int, Float, Bool, Rune, Enum:
+		write_scalar(w, n.value, false)
+
+	case:
+		strings.write_string(&w.builder, "null")
 	}
-
-	count^ = items
-	return w.err == .None
 }
 
-json_writer_array_end :: proc(v: ^Visitor) {close((^Json_Writer)(v), ']', .Parse_Array)}
+// >--------------------------------------------------------------------- Internals
 
-json_writer_map_begin :: proc(
-	v: ^Visitor,
-	name: string,
-	info: ^runtime.Type_Info,
-	key: ^runtime.Type_Info,
-	value: ^runtime.Type_Info,
-	count: ^int,
-) -> bool {
-	w := (^Json_Writer)(v)
-	open(w, name, '{', .Parse_Map)
-
-	count^ = count_items(w)
-	return w.err == .None
+// Object keys must be strings in JSON, so a primitive map key is wrapped in quotes.
+@(private = "file")
+write_key :: proc(w: ^Json_Writer, key: Node) {
+	#partial switch _ in key.value {
+	case Int, Float, Bool, Rune, Enum:
+		write_scalar(w, key.value, true)
+	case:
+		json_write_node(w, key)
+	}
 }
 
-json_writer_map_end :: proc(v: ^Visitor) {close((^Json_Writer)(v), '}', .Parse_Map)}
+@(private = "file")
+write_scalar :: proc(w: ^Json_Writer, value: Value, key: bool) {
+	buffer: [64]byte
 
-json_writer_string_begin :: proc(
-	v: ^Visitor,
-	name: string,
-	info: ^runtime.Type_Info,
-	count: ^int,
-) -> bool {
-	w := (^Json_Writer)(v)
-	prefix(w, name)
-	if !expect(w, '"', .Parse_String) do return false
+	#partial switch v in value {
+	case Int:
+		write_key_aware(w, format_int(buffer[:], get_int(v), v.signed), key)
 
-	length, _, ok := decode_string(w.src, w.pos, nil)
-	if !ok do fail(w, .Parse_String)
+	case Float:
+		f := get_float(v)
 
-	count^ = length
-	return w.err == .None
-}
-
-json_writer_string_end :: proc(v: ^Visitor, bytes: []byte) {
-	w := (^Json_Writer)(v)
-	_, w.pos, _ = decode_string(w.src, w.pos, bytes)
-}
-
-json_writer_primitive :: proc(
-	v: ^Visitor,
-	name: string,
-	data: rawptr,
-	ti: ^runtime.Type_Info,
-	tag: reflect.Struct_Tag,
-) {
-	w := (^Json_Writer)(v)
-	// prefix clears the flag, a primitive map key arrives wrapped in quotes
-	key := w.map_key
-	prefix(w, name)
-
-	#partial switch info in runtime.type_info_base(ti).variant {
-	case runtime.Type_Info_Integer:
-		if info.signed {
-			store_signed(w, data, ti.size, parse_signed_int(w, key))
+		if math.is_nan(f) || math.is_inf(f) {
+			write_key_aware(w, "null", key)
 		} else {
-			store_unsigned(w, data, ti.size, parse_unsigned_int(w, key))
+			s := strconv.write_float(buffer[:], f, 'g', -1, int(v.size) * 8)
+			write_key_aware(w, strings.trim_prefix(s, "+"), key)
 		}
 
-	case runtime.Type_Info_Float:
-		f := parse_float(w, key)
-		if w.err != .None do return
+	case Bool:
+		write_key_aware(w, get_bool(v) ? "true" : "false", key)
 
-		switch ti.size {
-		case 2:
-			(^f16)(data)^ = f16(f)
-		case 4:
-			(^f32)(data)^ = f32(f)
-		case 8:
-			(^f64)(data)^ = f
-		}
-
-	case runtime.Type_Info_Boolean:
-		store_unsigned(w, data, ti.size, parse_bool(w, key) ? 1 : 0)
-
-	case runtime.Type_Info_Enum:
-		val := parse_enum(w, info)
-		base := runtime.type_info_base(info.base)
-
-		if bi, ok := base.variant.(runtime.Type_Info_Integer); ok && bi.signed {
-			store_signed(w, data, base.size, val)
+	case Enum:
+		value := get_enum(v)
+		if name, ok := enum_name(v, value); ok {
+			write_quoted(w, name)
 		} else {
-			store_unsigned(w, data, base.size, u64(val))
+			write_key_aware(w, format_int(buffer[:], value, v.signed), key)
 		}
 
-	case runtime.Type_Info_String:
-		// Only non UTF-8 strings land here, walk sends the rest to string_begin
-		if scalar(w, key, .Parse_String) != "null" do fail(w, .Parse_String)
+	case Rune:
+		bytes, length := utf8.encode_rune(get_rune(v))
+		write_quoted(w, string(bytes[:length]))
 	}
 }
 
-// >------------------------------------------------------------------ Utilities
-
 @(private = "file")
-fail :: proc(w: ^Json_Writer, err: Json_Writer_Error) {
-	if w.err == .None do w.err = err
+format_int :: proc(buffer: []byte, value: i128, signed: bool) -> string {
+	if !signed || value >= 0 do return strconv.write_u128(buffer, u128(value), 10)
+
+	// Negating the minimum wraps to itself, which as u128 is still the right magnitude
+	buffer[0] = '-'
+	return string(buffer[:len(strconv.write_u128(buffer[1:], u128(-value), 10)) + 1])
 }
 
 @(private = "file")
-skip_ws :: proc(w: ^Json_Writer) -> bool {
-	if w.err != .None do return false
-
-	for w.pos < len(w.src) {
-		c := w.src[w.pos]
-		if c != ' ' && c != '\t' && c != '\n' && c != '\r' do break
-		w.pos += 1
-	}
-
-	return true
+write_key_aware :: proc(w: ^Json_Writer, s: string, key: bool) {
+	if key do strings.write_byte(&w.builder, '"')
+	strings.write_string(&w.builder, s)
+	if key do strings.write_byte(&w.builder, '"')
 }
 
 @(private = "file")
-expect :: proc(w: ^Json_Writer, c: byte, err: Json_Writer_Error) -> bool {
-	if !skip_ws(w) do return false
-
-	if w.pos >= len(w.src) || w.src[w.pos] != c {
-		fail(w, err)
-		return false
-	}
-
-	w.pos += 1
-	return true
+write_name :: proc(w: ^Json_Writer, name: string) {
+	write_quoted(w, name)
+	strings.write_string(&w.builder, w.pretty ? ": " : ":")
 }
 
 @(private = "file")
-token :: proc(w: ^Json_Writer) -> string {
-	if !skip_ws(w) do return ""
+write_quoted :: proc(w: ^Json_Writer, s: string) {
+	strings.write_byte(&w.builder, '"')
+	start := 0
 
-	start := w.pos
-	for w.pos < len(w.src) {
-		switch w.src[w.pos] {
-		case ' ', '\t', '\n', '\r', '{', '}', '[', ']', '"', ',', ':':
-			return w.src[start:w.pos]
-		}
+	for i in 0 ..< len(s) {
+		c := s[i]
 
-		w.pos += 1
-	}
-
-	return w.src[start:w.pos]
-}
-
-// Raw contents of a quoted string without escapes, for field names, enum names and
-// primitive map keys, which never need them.
-@(private = "file")
-quoted :: proc(w: ^Json_Writer, err: Json_Writer_Error) -> string {
-	if !expect(w, '"', err) do return ""
-
-	start := w.pos
-	for w.pos < len(w.src) && w.src[w.pos] != '"' {
-		if w.src[w.pos] == '\\' {
-			fail(w, err)
-			return ""
-		}
-
-		w.pos += 1
-	}
-
-	end := w.pos
-	if !expect(w, '"', err) do return ""
-	return w.src[start:end]
-}
-
-@(private = "file")
-scalar :: proc(w: ^Json_Writer, key: bool, err: Json_Writer_Error) -> string {
-	return key ? quoted(w, err) : token(w)
-}
-
-// Items are separated by commas at the container's own depth, a map entry is one item.
-@(private = "file")
-count_items :: proc(w: ^Json_Writer) -> int {
-	if !skip_ws(w) do return 0
-	if w.pos < len(w.src) && (w.src[w.pos] == ']' || w.src[w.pos] == '}') do return 0
-
-	count, depth, i := 1, 0, w.pos
-
-	for i < len(w.src) {
-		switch w.src[i] {
-		case '{', '[':
-			depth += 1
-
-		case '}', ']':
-			if depth == 0 do return count
-			depth -= 1
-
-		case ',':
-			if depth == 0 do count += 1
-
-		case '"':
-			i += 1
-
-			for i < len(w.src) && w.src[i] != '"' {
-				if w.src[i] == '\\' do i += 1
-				i += 1
-			}
-		}
-
-		i += 1
-	}
-
-	return count
-}
-
-@(private = "file")
-prefix :: proc(w: ^Json_Writer, name: string) {
-	if w.depth == 0 do return
-
-	if w.map_value {
-		w.map_value = false
-		expect(w, ':', .Parse_Separator)
-		return
-	}
-
-	w.map_key = false
-
-	if w.has_items do expect(w, ',', .Parse_Separator)
-	w.has_items = true
-
-	if name == "" do return
-	if quoted(w, .Parse_Field) != name do fail(w, .Parse_Field)
-	expect(w, ':', .Parse_Separator)
-}
-
-@(private = "file")
-open :: proc(w: ^Json_Writer, name: string, opener: byte, err: Json_Writer_Error) {
-	prefix(w, name)
-	expect(w, opener, err)
-
-	w.depth += 1
-	w.has_items = false
-}
-
-@(private = "file")
-close :: proc(w: ^Json_Writer, closer: byte, err: Json_Writer_Error) {
-	expect(w, closer, err)
-
-	w.depth -= 1
-	w.has_items = true
-}
-
-@(private = "file")
-parse_signed_int :: proc(w: ^Json_Writer, key: bool) -> i64 {
-	tok := scalar(w, key, .Parse_Signed_Int)
-	if w.err != .None do return 0
-
-	value, ok := strconv.parse_i64_of_base(tok, 10)
-	if !ok do fail(w, .Parse_Signed_Int)
-	return value
-}
-
-@(private = "file")
-parse_unsigned_int :: proc(w: ^Json_Writer, key: bool) -> u64 {
-	tok := scalar(w, key, .Parse_Unsigned_Int)
-	if w.err != .None do return 0
-
-	value, ok := strconv.parse_u64_of_base(tok, 10)
-	if !ok do fail(w, .Parse_Unsigned_Int)
-	return value
-}
-
-@(private = "file")
-parse_float :: proc(w: ^Json_Writer, key: bool) -> f64 {
-	tok := scalar(w, key, .Parse_Float)
-	if w.err != .None do return 0
-	if tok == "null" do return math.nan_f64()
-
-	value, ok := strconv.parse_f64(tok)
-	if !ok do fail(w, .Parse_Float)
-
-	return value
-}
-
-@(private = "file")
-parse_bool :: proc(w: ^Json_Writer, key: bool) -> bool {
-	switch scalar(w, key, .Parse_Bool) {
-	case "true":
-		return true
-	case "false":
-		return false
-	}
-
-	fail(w, .Parse_Bool)
-	return false
-}
-
-// Enums are names in quotes, or bare integers when the value has no named member. As a map
-// key the integer is quoted too, so a quoted integer is accepted as well.
-@(private = "file")
-parse_enum :: proc(w: ^Json_Writer, info: runtime.Type_Info_Enum) -> i64 {
-	if !skip_ws(w) do return 0
-
-	tok: string
-	if w.pos < len(w.src) && w.src[w.pos] == '"' {
-		tok = quoted(w, .Parse_Enum)
-		if w.err != .None do return 0
-
-		for name, i in info.names {
-			if name == tok do return i64(info.values[i])
-		}
-	} else {
-		tok = token(w)
-	}
-
-	value, ok := strconv.parse_i64_of_base(tok, 10)
-	if !ok do fail(w, .Parse_Enum)
-	return value
-}
-
-// Decodes the string body starting at `pos` (just past the opening quote) into `out` and
-// returns the decoded length and the position past the closing quote. With `out == nil` it
-// only measures, so the same rules size the allocation and fill it.
-@(private = "file")
-decode_string :: proc(src: string, pos: int, out: []byte) -> (length, end: int, ok: bool) {
-	i := pos
-
-	for i < len(src) {
-		c := src[i]
-		i += 1
+		if c >= 0x20 && c != '"' && c != '\\' do continue
+		strings.write_string(&w.builder, s[start:i])
 
 		switch c {
 		case '"':
-			return length, i, true
-
+			strings.write_string(&w.builder, `\"`)
 		case '\\':
-			if i >= len(src) do return
-			e := src[i]
-			i += 1
-
-			switch e {
-			case '"', '\\', '/':
-				c = e
-			case 'b':
-				c = '\b'
-			case 'f':
-				c = '\f'
-			case 'n':
-				c = '\n'
-			case 'r':
-				c = '\r'
-			case 't':
-				c = '\t'
-			case 'u':
-				r, hex_ok := decode_hex4(src, &i)
-				if !hex_ok do return
-
-				// Code points above the BMP come as a surrogate pair of escapes
-				if utf16.is_surrogate(r) {
-					if i + 2 > len(src) || src[i] != '\\' || src[i + 1] != 'u' do return
-					i += 2
-
-					low, low_ok := decode_hex4(src, &i)
-					if !low_ok do return
-
-					r = utf16.decode_surrogate_pair(r, low)
-					if r == utf16.REPLACEMENT_CHAR do return
-				}
-
-				bytes, n := utf8.encode_rune(r)
-				if out != nil do copy(out[length:], bytes[:n])
-				length += n
-				continue
-			case:
-				return
-			}
-
+			strings.write_string(&w.builder, `\\`)
+		case '\n':
+			strings.write_string(&w.builder, `\n`)
+		case '\r':
+			strings.write_string(&w.builder, `\r`)
+		case '\t':
+			strings.write_string(&w.builder, `\t`)
 		case:
-			if c < 0x20 do return
+			hex := "0123456789abcdef"
+			strings.write_string(&w.builder, `\u00`)
+			strings.write_byte(&w.builder, hex[c >> 4])
+			strings.write_byte(&w.builder, hex[c & 15])
 		}
 
-		if out != nil do out[length] = c
-		length += 1
+		start = i + 1
 	}
 
-	return
+	strings.write_string(&w.builder, s[start:])
+	strings.write_byte(&w.builder, '"')
 }
 
 @(private = "file")
-decode_hex4 :: proc(src: string, i: ^int) -> (r: rune, ok: bool) {
-	if i^ + 4 > len(src) do return
-	code, hex_ok := strconv.parse_u64_of_base(src[i^:i^ + 4], 16)
-	if !hex_ok do return
+newline :: proc(w: ^Json_Writer) {
+	if !w.pretty do return
 
-	i^ += 4
-	return rune(code), true
+	strings.write_byte(&w.builder, '\n')
+	for _ in 0 ..< int(w.tabsize) * w.depth do strings.write_byte(&w.builder, ' ')
 }
 
 @(private = "file")
-store_unsigned :: proc(w: ^Json_Writer, data: rawptr, size: int, value: u64) {
-	if w.err != .None do return
-	if size < 8 && value >> uint(size * 8) != 0 {
-		fail(w, .Out_Of_Range)
-		return
-	}
+open :: proc(w: ^Json_Writer, opener: byte) {
+	strings.write_byte(&w.builder, opener)
+	w.depth += 1
+}
 
-	switch size {
-	case 1:
-		(^u8)(data)^ = u8(value)
-	case 2:
-		(^u16)(data)^ = u16(value)
-	case 4:
-		(^u32)(data)^ = u32(value)
-	case 8:
-		(^u64)(data)^ = value
+// Separates an item from the previous one and indents it, inline items share a line.
+@(private = "file")
+item :: proc(w: ^Json_Writer, first: ^bool, inline: bool) {
+	if !first^ {
+		strings.write_byte(&w.builder, ',')
+		if w.pretty && inline do strings.write_byte(&w.builder, ' ')
 	}
+	first^ = false
+
+	if !inline do newline(w)
 }
 
 @(private = "file")
-store_signed :: proc(w: ^Json_Writer, data: rawptr, size: int, value: i64) {
-	if w.err != .None do return
-	if size < 8 && value >> uint(size * 8 - 1) != 0 && value >> uint(size * 8 - 1) != -1 {
-		fail(w, .Out_Of_Range)
-		return
+close :: proc(w: ^Json_Writer, closer: byte, first: bool, inline: bool) {
+	w.depth -= 1
+	if !first && !inline do newline(w)
+	strings.write_byte(&w.builder, closer)
+}
+
+@(private = "file")
+is_primitive :: proc(value: Value) -> bool {
+	#partial switch _ in value {
+	case Struct, Array, Map, Bit_Set, Union:
+		return false
 	}
 
-	switch size {
-	case 1:
-		(^i8)(data)^ = i8(value)
-	case 2:
-		(^i16)(data)^ = i16(value)
-	case 4:
-		(^i32)(data)^ = i32(value)
-	case 8:
-		(^i64)(data)^ = value
-	}
+	return true
 }
