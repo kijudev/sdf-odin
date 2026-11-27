@@ -1,4 +1,3 @@
-// Must match Shape_Kind in game/shape.odin
 static const uint KIND_SPHERE   = 0;
 static const uint KIND_BOX      = 1;
 static const uint KIND_TORUS    = 2;
@@ -16,21 +15,19 @@ struct Sdf_Primitive {
     uint kind;
     float4 params;
     float3 color;
-    float bound_radius; // sphere around pos containing the whole shape
+    float bound_radius;
 };
 
-// Must match Light_Kind in game/light.odin
 static const uint LIGHT_DIRECTIONAL = 0;
 static const uint LIGHT_POINT       = 1;
 
 struct Light {
-    float3 pos_or_dir; // directional: normalized direction towards the light, point: position
+    float3 pos_or_dir;
     uint kind;
-    float3 color;      // already multiplied by intensity
+    float3 color;
     float _pad;
 };
 
-// Must match Gpu_Camera in game/camera.odin
 struct Gpu_Camera {
     float3 pos;
     float focal_length;
@@ -50,7 +47,7 @@ struct Uniforms {
     float time;
     uint primitive_count;
     Gpu_Camera camera;
-    float3 bounds_min; // box around all primitives
+    float3 bounds_min;
     uint light_count;
     float3 bounds_max;
     float _pad1;
@@ -103,8 +100,6 @@ float sdf_plane(float3 p, float height) {
     return p.y - height;
 }
 
-// Smooth min that also returns how much of b to blend in (x = distance, y = blend factor).
-// Use the blend factor to lerp anything attached to the surfaces, like color.
 float2 smin_cubic(float a, float b, float k) {
     k *= 6.0;
     float h = max(k - abs(a - b), 0.0) / k;
@@ -129,12 +124,11 @@ float sdf_primitive(float3 p, Sdf_Primitive prim) {
 
 // >---------------------------------------------------------------------- Scene
 
-static const float  GROUND_HEIGHT = 0.0;
-static const float3 GROUND_COLOR  = float3(0.6, 0.6, 0.6);
+static const float GROUND_HEIGHT = 0.0;
+static const float GRID_CELL     = 2.0;
+static const float GRID_WIDTH    = 0.005;
 
-// Smooth union strength. Shapes only affect each other within 6 * SMOOTH_K,
-// and blended surfaces bulge out by at most SMOOTH_K (see SCENE_BOUNDS_MARGIN in game/renderer.odin)
-static const float SMOOTH_K     = 0.25;
+static const float SMOOTH_K     = 0.1;
 static const float BLEND_RANGE  = 6.0 * SMOOTH_K;
 
 struct Surface {
@@ -142,15 +136,12 @@ struct Surface {
     float3 color;
 };
 
-// Primitives only. The ground plane is intersected analytically in fragment_main.
 Surface scene_surface(float3 p) {
     Surface s = { 1e10, float3(0.0) };
 
     for (uint i = 0; i < u.primitive_count; i++) {
         Sdf_Primitive prim = u.primitives[i];
 
-        // The real distance is at least the distance to the bounding sphere. If even that is
-        // too far to blend with what we have, this shape can't change the result: skip it.
         float bound = length(p - prim.pos) - prim.bound_radius;
         if (bound > s.dist + BLEND_RANGE) continue;
 
@@ -162,9 +153,28 @@ Surface scene_surface(float3 p) {
     return s;
 }
 
-// distance only, used for marching/normals/shadows (the color math gets optimized out)
 float scene(float3 p) {
     return scene_surface(p).dist;
+}
+
+float ground_grid(float2 xz) {
+    // Plane position measured in cell units.
+    float2 c = xz / GRID_CELL;
+
+    // `frac` returns the fractional part, this is where we are in the grid cell.
+    float2 f = frac(c);
+
+    // How far we we from the nearest edge.
+    float2 d = min(f, 1.0 - f);
+
+    // How much `c` changes across one pixel - GPUs process pixel quads.
+    float2 fw = fwidth(c);
+
+    // 1 on the line and 0 off it. Anti-aliasing with smoothstep.
+    float2 m = 1.0 - smoothstep(GRID_WIDTH - 0.5 * fw, GRID_WIDTH + 0.5 * fw, d);
+
+    // A pixel is white if it is on a x-line or a y-line.
+    return max(m.x, m.y);
 }
 
 // >------------------------------------------------------------------ Rendering
@@ -173,7 +183,6 @@ static const int   MAX_STEPS = 128;
 static const float MAX_DIST  = 50.0;
 static const float SURF_EPS  = 0.001;
 
-// Slab test against the scene bounds. Returns (t_enter, t_exit), missed if t_enter > t_exit.
 float2 ray_scene_bounds(float3 ro, float3 rd) {
     if (u.primitive_count == 0) return float2(1.0, -1.0);
 
@@ -182,17 +191,16 @@ float2 ray_scene_bounds(float3 ro, float3 rd) {
     float3 t1  = (u.bounds_max - ro) * inv;
     float3 lo  = min(t0, t1);
     float3 hi  = max(t0, t1);
+
     return float2(max(lo.x, max(lo.y, lo.z)), min(hi.x, min(hi.y, hi.z)));
 }
 
-// Ray vs ground plane. Returns distance along ray, or MAX_DIST if it never hits.
 float ray_ground(float3 ro, float3 rd) {
-    if (rd.y >= 0.0 || ro.y < GROUND_HEIGHT) return MAX_DIST;
-    return (GROUND_HEIGHT - ro.y) / rd.y;
+    if (abs(rd.y) < 1e-6) return MAX_DIST;
+    float t = (GROUND_HEIGHT - ro.y) / rd.y;
+    return t > 0.0 ? t : MAX_DIST;
 }
 
-// Marches only the part of the ray inside the scene bounds, up to t_max.
-// Returns distance along ray, or -1 on miss.
 float raymarch(float3 ro, float3 rd, float t_max) {
     float2 span = ray_scene_bounds(ro, rd);
     float t     = max(span.x, 0.0);
@@ -207,7 +215,6 @@ float raymarch(float3 ro, float3 rd, float t_max) {
     return -1.0;
 }
 
-// tetrahedron technique: 4 samples instead of 6
 float3 calc_normal(float3 p) {
     const float2 k = float2(1.0, -1.0);
     const float h = 0.0005;
@@ -218,8 +225,6 @@ float3 calc_normal(float3 p) {
         k.xxx * scene(p + k.xxx * h));
 }
 
-// 1.0 = lit, 0.0 = in shadow. Only checks up to t_max (the light's distance),
-// and only the part of the ray inside the scene bounds can be occluded.
 float hard_shadow(float3 ro, float3 rd, float t_max) {
     float2 span = ray_scene_bounds(ro, rd);
     float t     = max(span.x, 0.02);
@@ -234,10 +239,10 @@ float hard_shadow(float3 ro, float3 rd, float t_max) {
     return 1.0;
 }
 
-static const float3 AMBIENT_COLOR = float3(0.15, 0.2, 0.3);
+static const float3 AMBIENT_COLOR = float3(0.1, 0.1, 0.1);
 
 float3 shade(float3 p, float3 n, float3 albedo) {
-    float3 light = AMBIENT_COLOR * (0.5 + 0.5 * n.y); // sky fill, brighter facing up
+    float3 light = AMBIENT_COLOR * (0.5 + 0.5 * n.y);
 
     for (uint i = 0; i < u.light_count; i++) {
         Light l = u.lights[i];
@@ -254,7 +259,7 @@ float3 shade(float3 p, float3 n, float3 albedo) {
         }
 
         float n_dot_l = dot(n, to_light);
-        if (n_dot_l <= 0.0) continue; // facing away, no need for a shadow ray
+        if (n_dot_l <= 0.0) continue;
 
         float shadow = hard_shadow(p + n * 0.002, to_light, light_dist);
         light += l.color * n_dot_l * attenuation * shadow;
@@ -272,11 +277,11 @@ float4 fragment_main(Vertex_Output input) : SV_Target {
     float3 ro = cam.pos;
     float3 rd = normalize(uv.x * cam.right + uv.y * cam.up + cam.focal_length * cam.forward);
 
-    float3 sky = lerp(float3(0.9, 0.85, 0.95), float3(0.45, 0.55, 0.8), saturate(rd.y * 2.0));
+    float3 sky = float3(0.0);
     float3 col = sky;
 
-    // ground is hit analytically, then objects are only marched up to it
     float t_ground = ray_ground(ro, rd);
+    float grid = ground_grid((ro + rd * t_ground).xz);
     float t_obj    = raymarch(ro, rd, t_ground);
 
     bool  hit_obj = t_obj > 0.0;
@@ -285,14 +290,13 @@ float4 fragment_main(Vertex_Output input) : SV_Target {
     if (t < MAX_DIST) {
         float3 p = ro + rd * t;
         float3 n      = hit_obj ? calc_normal(p) : float3(0.0, 1.0, 0.0);
-        float3 albedo = hit_obj ? scene_surface(p).color : GROUND_COLOR;
 
-        col = shade(p, n, albedo);
+        float3 albedo = scene_surface(p).color;
 
-        // fade to sky with distance
+        col = hit_obj ? shade(p, n, albedo) : float3(grid);
         col = lerp(col, sky, 1.0 - exp(-0.002 * t * t));
     }
 
-    col = pow(col, 1.0 / 2.2); // gamma
+    col = pow(col, 1.0 / 2.2);
     return float4(col, 1.0);
 }
